@@ -1,3 +1,4 @@
+mod metadata;
 mod split;
 
 use std::env;
@@ -35,6 +36,13 @@ const STEM_JSON: &str = r##"{
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    if args.iter().any(|a| a == "--transfer-metadata") {
+        let input = flag(&args, "--input");
+        let output = flag(&args, "--output");
+        metadata::run(&input, &output);
+        return;
+    }
 
     if let Some(path) = optional_flag(&args, "--split") {
         let token = optional_flag(&args, "--token")
@@ -155,7 +163,7 @@ fn stem_payload_b64() -> String {
 fn flag(args: &[String], name: &str) -> String {
     optional_flag(args, name).unwrap_or_else(|| {
         die(
-            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]",
+            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]\n  genstems --transfer-metadata --input FILE --output FILE.stem.mp4",
         )
     })
 }

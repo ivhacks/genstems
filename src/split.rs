@@ -292,9 +292,10 @@ fn download_export(token: &str, host: &str, job_id: &str, export_id: &str, dest:
     }
     // reject html challenge pages written as "flac"
     if let Ok(head) = fs::read(dest)
-        && (head.starts_with(b"<!DOCTYPE") || head.starts_with(b"<html")) {
-            die("download got cloudflare html challenge, not audio");
-        }
+        && (head.starts_with(b"<!DOCTYPE") || head.starts_with(b"<html"))
+    {
+        die("download got cloudflare html challenge, not audio");
+    }
 }
 
 /// run curl, return (http_code, body). body is stdout when not using -o.
