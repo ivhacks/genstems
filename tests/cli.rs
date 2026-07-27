@@ -123,7 +123,7 @@ fn has_stem_udta(path: &Path) -> bool {
 
 #[test]
 fn genstems_packs_flac_into_five_track_stem_mp4() {
-    for tool in ["ffmpeg", "ffprobe", "MP4Box", "base64"] {
+    for tool in ["ffmpeg", "ffprobe", "MP4Box"] {
         require_tool(tool);
     }
 
@@ -163,7 +163,7 @@ fn genstems_packs_flac_into_five_track_stem_mp4() {
 
     assert_eq!(stream_count(&output), 5, "expected 5 audio tracks");
     for i in 0..5 {
-        assert_eq!(codec_name(&output, i), "alac", "track {i} not alac");
+        assert_eq!(codec_name(&output, i), "flac", "track {i} not flac");
     }
 
     let master_d = stream_duration(&output, 0);
