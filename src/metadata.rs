@@ -1,7 +1,8 @@
-//! copy tags + cover art from flac/mp3 onto an existing .stem.mp4 (preserves stem udta).
+//! copy tags + cover art from a source track onto a finished .stem.mp4 (preserves stem udta).
+//! called automatically after packing.
 //!
 //! flac: metaflac tags + picture → MP4Box -itags
-//! mp3:  ffprobe tags + ffmpeg attached pic → MP4Box -itags
+//! anything else (mp3, …): ffprobe tags + ffmpeg attached pic → MP4Box -itags
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,39 +12,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
-pub fn run(input: &str, output: &str) {
-    let input_path = Path::new(input);
-    let output_path = Path::new(output);
+/// pull metadata from `source` (master / original) onto `stem` output.
+pub fn from_source(source: &str, stem: &str) {
+    let source_path = Path::new(source);
+    let stem_path = Path::new(stem);
 
-    if !input_path.is_file() {
-        die(&format!("--input not found: {input}"));
+    if !source_path.is_file() {
+        die(&format!("metadata source not found: {source}"));
     }
-    if !output_path.is_file() {
-        die(&format!("--output not found: {output}"));
+    if !stem_path.is_file() {
+        die(&format!("stem file not found: {stem}"));
     }
 
-    let in_ext = input_path
+    let in_ext = source_path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let out_name = output_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    if !out_name.ends_with(".stem.mp4") {
-        die("--output must be a .stem.mp4 file");
-    }
 
     match in_ext.as_str() {
-        "flac" => transfer_flac(input_path, output_path),
-        "mp3" => transfer_mp3(input_path, output_path),
-        _ => die(&format!("--input must be .flac or .mp3 (got .{in_ext})")),
+        "flac" => transfer_flac(source_path, stem_path),
+        _ => transfer_ffprobe(source_path, stem_path),
     }
-
-    eprintln!("transferred metadata {input} → {output}");
 }
 
 fn transfer_flac(input: &Path, output: &Path) {
@@ -58,7 +48,7 @@ fn transfer_flac(input: &Path, output: &Path) {
     let _ = fs::remove_dir_all(&work);
 }
 
-fn transfer_mp3(input: &Path, output: &Path) {
+fn transfer_ffprobe(input: &Path, output: &Path) {
     require("ffprobe");
     require("ffmpeg");
     require("MP4Box");
@@ -74,6 +64,9 @@ fn transfer_mp3(input: &Path, output: &Path) {
 fn apply_itags(work: &Path, tags: &BTreeMap<String, String>, cover: Option<&Path>, output: &Path) {
     let itags_path = work.join("itags.txt");
     write_itags_file(&itags_path, tags, cover);
+    if !itags_path.is_file() {
+        return;
+    }
 
     let status = Command::new("MP4Box")
         .args([
@@ -130,8 +123,8 @@ fn read_ffprobe_tags(input: &Path) -> BTreeMap<String, String> {
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let v: Value = serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| die(&format!("ffprobe json: {e}")));
+    let v: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| die(&format!("ffprobe json: {e}")));
     let Some(tags) = v
         .get("format")
         .and_then(|f| f.get("tags"))
@@ -315,7 +308,7 @@ fn write_itags_file(path: &Path, tags: &BTreeMap<String, String>, cover: Option<
     // itunes tags when those freeform QT keys are mixed into the same -itags file.
 
     if lines.is_empty() {
-        die("input has no tags or cover art to transfer");
+        return; // nothing to write
     }
 
     fs::write(path, lines.join("\n") + "\n").expect("write itags file");

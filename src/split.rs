@@ -5,11 +5,11 @@
 //! websockets use a hand-rolled upgrade + tungstenite framing.
 
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -23,6 +23,10 @@ const ORIGIN: &str = "https://vocalremover.org";
 const MODEL: u32 = 9;
 const TUS_CHUNK: u64 = 10 * 1024 * 1024; // 10 MiB, matches browser
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0";
+const SPLIT_WAIT: Duration = Duration::from_secs(20 * 60);
+const EXPORT_WAIT: Duration = Duration::from_secs(3 * 60);
+const EXPORT_TRIES: u32 = 4;
+const WS_READ_TICK: Duration = Duration::from_secs(15);
 
 /// downloaded stem parts (in a temp dir — caller should delete `work` when done).
 pub struct SplitFiles {
@@ -68,14 +72,43 @@ pub fn run(input: &str, token: &str) -> SplitFiles {
 
     eprintln!("starting split…");
     attach_file(&token, &host, &job_id);
-    wait_actioncable(&host, "SplitterChannel", &job_id, "ready");
+    if let Err(e) = wait_actioncable(&host, "SplitterChannel", &job_id, "ready", SPLIT_WAIT) {
+        die(&e);
+    }
     eprintln!("split ready");
 
     for (stem_key, dest) in [("other", &instrumental), ("vocals", &vocal)] {
-        eprintln!("exporting {}…", dest.file_name().unwrap().to_string_lossy());
-        let export_id = start_export(&token, &host, &job_id, stem_key);
-        wait_actioncable(&host, "ExportChannel", &export_id, "ready");
-        download_export(&token, &host, &job_id, &export_id, dest);
+        let name = dest.file_name().unwrap().to_string_lossy();
+        let mut done = false;
+        for attempt in 1..=EXPORT_TRIES {
+            eprintln!("exporting {name} (try {attempt}/{EXPORT_TRIES})…");
+            let (export_id, already_ready) = start_export(&token, &host, &job_id, stem_key);
+            let ready = if already_ready {
+                eprintln!("  ExportChannel: ready");
+                true
+            } else {
+                match wait_actioncable(&host, "ExportChannel", &export_id, "ready", EXPORT_WAIT) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("  {e}");
+                        false
+                    }
+                }
+            };
+            if ready {
+                download_export(&token, &host, &job_id, &export_id, dest);
+                done = true;
+                break;
+            }
+            if attempt < EXPORT_TRIES {
+                eprintln!("  retrying export…");
+            }
+        }
+        if !done {
+            die(&format!(
+                "export of {name} failed after {EXPORT_TRIES} tries"
+            ));
+        }
     }
 
     SplitFiles {
@@ -236,7 +269,7 @@ fn attach_file(token: &str, host: &str, job_id: &str) {
     check_http("attach_file", code, &body);
 }
 
-fn start_export(token: &str, host: &str, job_id: &str, stem: &str) -> String {
+fn start_export(token: &str, host: &str, job_id: &str, stem: &str) -> (String, bool) {
     let stems = format!(r#"{{"{stem}":1}}"#);
     let (code, body) = curl(&[
         "-X",
@@ -262,10 +295,12 @@ fn start_export(token: &str, host: &str, job_id: &str, stem: &str) -> String {
     check_http("export start", code, &body);
     let v: Value = serde_json::from_str(&body)
         .unwrap_or_else(|e| die(&format!("bad export json: {e}\n{body}")));
-    v["id"]
+    let id = v["id"]
         .as_str()
         .unwrap_or_else(|| die(&format!("no export id: {body}")))
-        .to_string()
+        .to_string();
+    let ready = v["status"].as_str() == Some("ready");
+    (id, ready)
 }
 
 fn download_export(token: &str, host: &str, job_id: &str, export_id: &str, dest: &Path) {
@@ -409,22 +444,41 @@ fn require_curl() {
     }
 }
 
-/// actioncable over wss://host/cable — subscribe until message.status == want.
-fn wait_actioncable(host_url: &str, channel: &str, id: &str, want: &str) {
+/// actioncable over wss://host/cable — subscribe until message.status == want or timeout.
+fn wait_actioncable(
+    host_url: &str,
+    channel: &str,
+    id: &str,
+    want: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     let host = host_url
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/');
 
-    let mut socket = cable_connect(host);
+    let deadline = Instant::now() + timeout;
+    let mut socket = cable_connect(host)?;
 
     let identifier = json!({ "id": id, "channel": channel }).to_string();
     let mut subscribed = false;
 
     loop {
+        if Instant::now() >= deadline {
+            let _ = socket.close(None);
+            return Err(format!(
+                "{channel} timed out after {}s waiting for '{want}'",
+                timeout.as_secs()
+            ));
+        }
+
         let msg = match socket.read() {
             Ok(m) => m,
-            Err(e) => die(&format!("ws read: {e}")),
+            Err(e) if ws_is_timeout(&e) => continue,
+            Err(e) => {
+                let _ = socket.close(None);
+                return Err(format!("ws read: {e}"));
+            }
         };
         let text = match msg {
             Message::Text(t) => t.to_string(),
@@ -432,7 +486,7 @@ fn wait_actioncable(host_url: &str, channel: &str, id: &str, want: &str) {
                 let _ = socket.send(Message::Pong(p));
                 continue;
             }
-            Message::Close(_) => die("ws closed before ready"),
+            Message::Close(_) => return Err("ws closed before ready".into()),
             _ => continue,
         };
 
@@ -447,9 +501,9 @@ fn wait_actioncable(host_url: &str, channel: &str, id: &str, want: &str) {
                     "command": "subscribe",
                     "identifier": identifier,
                 });
-                socket
-                    .send(Message::Text(sub.to_string().into()))
-                    .unwrap_or_else(|e| die(&format!("ws subscribe: {e}")));
+                if let Err(e) = socket.send(Message::Text(sub.to_string().into())) {
+                    return Err(format!("ws subscribe: {e}"));
+                }
             }
             Some("confirm_subscription") => {
                 subscribed = true;
@@ -458,9 +512,9 @@ fn wait_actioncable(host_url: &str, channel: &str, id: &str, want: &str) {
                     "identifier": identifier,
                     "data": json!({ "action": "confirm_subscription" }).to_string(),
                 });
-                socket
-                    .send(Message::Text(conf.to_string().into()))
-                    .unwrap_or_else(|e| die(&format!("ws confirm: {e}")));
+                if let Err(e) = socket.send(Message::Text(conf.to_string().into())) {
+                    return Err(format!("ws confirm: {e}"));
+                }
             }
             Some("ping") | Some("disconnect") => {}
             _ => {}
@@ -481,23 +535,32 @@ fn wait_actioncable(host_url: &str, channel: &str, id: &str, want: &str) {
                     let _ = socket.send(Message::Text(unsub.to_string().into()));
                 }
                 let _ = socket.close(None);
-                return;
+                return Ok(());
             }
             if status == "failed" || status == "error" {
-                die(&format!("{channel} failed: {text}"));
+                return Err(format!("{channel} failed: {text}"));
             }
         }
     }
 }
 
-fn cable_connect(host: &str) -> WebSocket<native_tls::TlsStream<TcpStream>> {
-    let connector = TlsConnector::new().unwrap_or_else(|e| die(&format!("tls: {e}")));
-    let tcp = TcpStream::connect((host, 443)).unwrap_or_else(|e| die(&format!("tcp {host}: {e}")));
-    let _ = tcp.set_read_timeout(Some(Duration::from_secs(600)));
+fn ws_is_timeout(e: &tungstenite::Error) -> bool {
+    match e {
+        tungstenite::Error::Io(ioe) => {
+            matches!(ioe.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+        }
+        _ => false,
+    }
+}
+
+fn cable_connect(host: &str) -> Result<WebSocket<native_tls::TlsStream<TcpStream>>, String> {
+    let connector = TlsConnector::new().map_err(|e| format!("tls: {e}"))?;
+    let tcp = TcpStream::connect((host, 443)).map_err(|e| format!("tcp {host}: {e}"))?;
+    let _ = tcp.set_read_timeout(Some(WS_READ_TICK));
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(60)));
     let mut stream = connector
         .connect(host, tcp)
-        .unwrap_or_else(|e| die(&format!("tls connect {host}: {e}")));
+        .map_err(|e| format!("tls connect {host}: {e}"))?;
 
     let key = B64.encode(format!("genstems-{}", std::process::id()).as_bytes());
     let req = format!(
@@ -516,16 +579,16 @@ fn cable_connect(host: &str) -> WebSocket<native_tls::TlsStream<TcpStream>> {
     );
     stream
         .write_all(req.as_bytes())
-        .unwrap_or_else(|e| die(&format!("ws write: {e}")));
+        .map_err(|e| format!("ws write: {e}"))?;
 
     let mut buf = Vec::new();
     let mut tmp = [0u8; 2048];
     loop {
         let n = stream
             .read(&mut tmp)
-            .unwrap_or_else(|e| die(&format!("ws handshake read: {e}")));
+            .map_err(|e| format!("ws handshake read: {e}"))?;
         if n == 0 {
-            die("ws handshake: connection closed");
+            return Err("ws handshake: connection closed".into());
         }
         buf.extend_from_slice(&tmp[..n]);
         if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -533,16 +596,21 @@ fn cable_connect(host: &str) -> WebSocket<native_tls::TlsStream<TcpStream>> {
             let headers = String::from_utf8_lossy(&buf[..header_end]);
             let status = headers.lines().next().unwrap_or("");
             if !status.contains("101") {
-                die(&format!(
+                return Err(format!(
                     "ws connect wss://{host}/cable: {status}\n{}",
                     headers.chars().take(500).collect::<String>()
                 ));
             }
             let leftover = buf[header_end..].to_vec();
-            return WebSocket::from_partially_read(stream, leftover, Role::Client, None);
+            return Ok(WebSocket::from_partially_read(
+                stream,
+                leftover,
+                Role::Client,
+                None,
+            ));
         }
         if buf.len() > 64 * 1024 {
-            die("ws handshake: response too large");
+            return Err("ws handshake: response too large".into());
         }
     }
 }
