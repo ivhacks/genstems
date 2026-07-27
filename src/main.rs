@@ -37,7 +37,6 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if let Some(path) = optional_flag(&args, "--split") {
-        // browser localStorage key `next-token` after patreon login (not a cookie)
         let token = optional_flag(&args, "--token")
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| {
@@ -47,20 +46,23 @@ fn main() {
                      then: genstems --split FILE --token <next-token>",
                 )
             });
-        split::run(&path, &token);
+        let output = optional_flag(&args, "--output").unwrap_or_else(|| default_stem_out(&path));
+
+        let split = split::run(&path, &token);
+        pack_stems(
+            &path,
+            split.vocal.to_str().unwrap(),
+            split.instrumental.to_str().unwrap(),
+            &output,
+        );
+        let _ = fs::remove_dir_all(&split.work);
         return;
     }
 
     let master = flag(&args, "--master");
     let vocal = flag(&args, "--vocal");
     let instrumental = flag(&args, "--instrumental");
-    let output = optional_flag(&args, "--output").unwrap_or_else(|| {
-        let stem = Path::new(&master)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("output");
-        format!("{stem}.stem.mp4")
-    });
+    let output = optional_flag(&args, "--output").unwrap_or_else(|| default_stem_out(&master));
 
     for (name, path) in [
         ("--master", &master),
@@ -72,6 +74,18 @@ fn main() {
         }
     }
 
+    pack_stems(&master, &vocal, &instrumental, &output);
+}
+
+fn default_stem_out(master: &str) -> String {
+    let stem = Path::new(master)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    format!("{stem}.stem.mp4")
+}
+
+fn pack_stems(master: &str, vocal: &str, instrumental: &str, output: &str) {
     let stem_b64 = stem_payload_b64();
 
     let work = work_dir();
@@ -83,16 +97,16 @@ fn main() {
     let instrumental_a = work.join("instrumental.mp4");
     let silence_a = work.join("silence.mp4");
 
-    to_flac(&master, &master_a);
-    to_flac(&vocal, &vocal_a);
-    to_flac(&instrumental, &instrumental_a);
+    to_flac(master, &master_a);
+    to_flac(vocal, &vocal_a);
+    to_flac(instrumental, &instrumental_a);
 
     let duration = probe(&master_a, "format=duration");
     let sample_rate = probe(&master_a, "stream=sample_rate");
     make_silence(&silence_a, &duration, &sample_rate);
 
     // track layout: master, Vocal, Instrumental, silence, silence
-    run(
+    run_cmd(
         "MP4Box",
         &[
             "-add",
@@ -117,7 +131,7 @@ fn main() {
             "-ab",
             "mp42",
             "-new",
-            &output,
+            output,
         ],
     );
 
@@ -141,7 +155,7 @@ fn stem_payload_b64() -> String {
 fn flag(args: &[String], name: &str) -> String {
     optional_flag(args, name).unwrap_or_else(|| {
         die(
-            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN",
+            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]",
         )
     })
 }
@@ -161,7 +175,7 @@ fn work_dir() -> PathBuf {
 }
 
 fn to_flac(input: &str, output: &Path) {
-    run(
+    run_cmd(
         "ffmpeg",
         &[
             "-y",
@@ -179,7 +193,7 @@ fn to_flac(input: &str, output: &Path) {
 }
 
 fn make_silence(output: &Path, duration: &str, sample_rate: &str) {
-    run(
+    run_cmd(
         "ffmpeg",
         &[
             "-y",
@@ -222,7 +236,7 @@ fn probe(file: &Path, entries: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn run(program: &str, args: &[&str]) {
+fn run_cmd(program: &str, args: &[&str]) {
     let status = Command::new(program)
         .args(args)
         .stdout(Stdio::inherit())

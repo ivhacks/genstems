@@ -24,8 +24,16 @@ const MODEL: u32 = 9;
 const TUS_CHUNK: u64 = 10 * 1024 * 1024; // 10 MiB, matches browser
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:151.0) Gecko/20100101 Firefox/151.0";
 
+/// downloaded stem parts (in a temp dir — caller should delete `work` when done).
+pub struct SplitFiles {
+    pub work: PathBuf,
+    pub vocal: PathBuf,
+    pub instrumental: PathBuf,
+}
+
 /// `token` is the browser localStorage `next-token` (uuid). optional leading "Bearer " is fine.
-pub fn run(input: &str, token: &str) {
+/// downloads vocals/instrumental into a temp dir (nothing left in cwd).
+pub fn run(input: &str, token: &str) -> SplitFiles {
     let token = normalize_token(token);
     let path = Path::new(input);
     if !path.is_file() {
@@ -40,6 +48,17 @@ pub fn run(input: &str, token: &str) {
     let size = path.metadata().expect("stat input").len();
     let mime = mime_for(path);
 
+    let work = {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("genstems-split-{n}"))
+    };
+    fs::create_dir_all(&work).expect("mkdir split work dir");
+    let vocal = work.join("vocals.flac");
+    let instrumental = work.join("music.flac");
+
     eprintln!("creating split job…");
     let (job_id, host) = create_job(&token);
     eprintln!("job {job_id} on {host}");
@@ -52,13 +71,17 @@ pub fn run(input: &str, token: &str) {
     wait_actioncable(&host, "SplitterChannel", &job_id, "ready");
     eprintln!("split ready");
 
-    for (stem_key, label) in [("other", "music"), ("vocals", "vocals")] {
-        eprintln!("exporting {label}…");
+    for (stem_key, dest) in [("other", &instrumental), ("vocals", &vocal)] {
+        eprintln!("exporting {}…", dest.file_name().unwrap().to_string_lossy());
         let export_id = start_export(&token, &host, &job_id, stem_key);
         wait_actioncable(&host, "ExportChannel", &export_id, "ready");
-        let dest = default_name(path, label);
-        download_export(&token, &host, &job_id, &export_id, &dest);
-        eprintln!("wrote {}", dest.display());
+        download_export(&token, &host, &job_id, &export_id, dest);
+    }
+
+    SplitFiles {
+        work,
+        vocal,
+        instrumental,
     }
 }
 
@@ -553,14 +576,6 @@ fn mime_for(path: &Path) -> &'static str {
     }
 }
 
-fn default_name(input: &Path, label: &str) -> PathBuf {
-    let stem = input
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("track");
-    PathBuf::from(format!("{stem} [{label}].flac"))
-}
-
 fn die(msg: &str) -> ! {
     eprintln!("{msg}");
     std::process::exit(1);
@@ -576,19 +591,6 @@ mod tests {
         assert_eq!(b64s("audio/flac"), "YXVkaW8vZmxhYw==");
         assert_eq!(b64s("33319903"), "MzMzMTk5MDM=");
         assert_eq!(b64s("9"), "OQ==");
-    }
-
-    #[test]
-    fn default_names() {
-        let p = Path::new("/tmp/Cheerleader.flac");
-        assert_eq!(
-            default_name(p, "music").to_str().unwrap(),
-            "Cheerleader [music].flac"
-        );
-        assert_eq!(
-            default_name(p, "vocals").to_str().unwrap(),
-            "Cheerleader [vocals].flac"
-        );
     }
 
     #[test]
