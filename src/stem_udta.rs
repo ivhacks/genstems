@@ -31,8 +31,8 @@ const STEM_JSON: &str = r##"{
     }
   },
   "stems": [
-    { "name": "Vocal", "color": "#ad65ff" },
     { "name": "Instrumental", "color": "#00e8e8" },
+    { "name": "Vocal", "color": "#ad65ff" },
     { "name": "-", "color": "#3a3a3a" },
     { "name": "-", "color": "#3a3a3a" }
   ]
@@ -65,12 +65,82 @@ pub fn recolor_in_place(stem: &str) {
     write_udta(path, &meta);
 
     eprintln!(
-        "{stem}: vocal {} / instrumental {}",
-        colors.vocal, colors.instrumental
+        "{stem}: instrumental {} / vocal {}",
+        colors.instrumental, colors.vocal
     );
 }
 
-/// stems[0] is Vocal and stems[1] is Instrumental — the layout we always write.
+/// swap the instrumental and vocal tracks (audio + stem names/colors) on an
+/// existing .stem.mp4. master and the two silence tracks stay put.
+pub fn swap_tracks_in_place(stem: &str) {
+    let path = Path::new(stem);
+    if !path.is_file() {
+        die(&format!("stem file not found: {stem}"));
+    }
+
+    let mut meta = read_udta(path);
+    let (name0, name1) = {
+        let stems = meta
+            .get_mut("stems")
+            .and_then(|s| s.as_array_mut())
+            .unwrap_or_else(|| die("stem metadata missing stems[]"));
+        if stems.len() != 4 {
+            die(&format!("stem metadata needs 4 stems, got {}", stems.len()));
+        }
+        stems.swap(0, 1);
+        (
+            stems[0]["name"].as_str().unwrap_or("-").to_string(),
+            stems[1]["name"].as_str().unwrap_or("-").to_string(),
+        )
+    };
+
+    // remux: keep master (1) and silences (4,5); swap audio on stems 2 and 3.
+    // names come from the already-swapped metadata so this is reversible.
+    let src = path.to_str().unwrap();
+    let tmp = temp_path("stem.mp4");
+    let status = Command::new("MP4Box")
+        .args([
+            "-add",
+            &format!("{src}#1:name=Master"),
+            "-add",
+            &format!("{src}#3:disable:name={name0}"),
+            "-add",
+            &format!("{src}#2:disable:name={name1}"),
+            "-add",
+            &format!("{src}#4:disable:name=-"),
+            "-add",
+            &format!("{src}#5:disable:name=-"),
+            "-brand",
+            "M4A ",
+            "-ab",
+            "isom",
+            "-ab",
+            "mp42",
+            "-new",
+            tmp.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .unwrap_or_else(|e| die(&format!("failed to run MP4Box: {e}")));
+    if !status.success() {
+        die("MP4Box remux failed while swapping tracks");
+    }
+
+    // stem udta first, then tags/cover from the original (same order as pack)
+    write_udta(&tmp, &meta);
+    crate::metadata::from_source(src, tmp.to_str().unwrap());
+
+    fs::rename(&tmp, path).unwrap_or_else(|e| {
+        // cross-device fallback
+        fs::copy(&tmp, path).unwrap_or_else(|e2| die(&format!("replace stem failed: {e} / {e2}")));
+        let _ = fs::remove_file(&tmp);
+    });
+
+    eprintln!("{stem}: swapped instrumental ↔ vocal");
+}
+
+/// stems[0] is Instrumental and stems[1] is Vocal — the layout we always write.
 fn set_colors(meta: &mut Value, colors: &StemColors) {
     let stems = meta
         .get_mut("stems")
@@ -79,8 +149,8 @@ fn set_colors(meta: &mut Value, colors: &StemColors) {
     if stems.len() != 4 {
         die(&format!("stem metadata needs 4 stems, got {}", stems.len()));
     }
-    stems[0]["color"] = Value::String(colors.vocal.clone());
-    stems[1]["color"] = Value::String(colors.instrumental.clone());
+    stems[0]["color"] = Value::String(colors.instrumental.clone());
+    stems[1]["color"] = Value::String(colors.vocal.clone());
 }
 
 fn encode(meta: &Value) -> String {
@@ -156,8 +226,10 @@ mod tests {
     #[test]
     fn payload_without_colors_keeps_template_defaults() {
         let meta = decode(&payload_b64(None));
-        assert_eq!(meta["stems"][0]["color"], "#ad65ff");
-        assert_eq!(meta["stems"][1]["color"], "#00e8e8");
+        assert_eq!(meta["stems"][0]["name"], "Instrumental");
+        assert_eq!(meta["stems"][0]["color"], "#00e8e8");
+        assert_eq!(meta["stems"][1]["name"], "Vocal");
+        assert_eq!(meta["stems"][1]["color"], "#ad65ff");
     }
 
     #[test]
@@ -168,10 +240,10 @@ mod tests {
         };
         let meta = decode(&payload_b64(Some(&colors)));
 
-        assert_eq!(meta["stems"][0]["name"], "Vocal");
-        assert_eq!(meta["stems"][0]["color"], "#3dc2cc");
-        assert_eq!(meta["stems"][1]["name"], "Instrumental");
-        assert_eq!(meta["stems"][1]["color"], "#3dcc74");
+        assert_eq!(meta["stems"][0]["name"], "Instrumental");
+        assert_eq!(meta["stems"][0]["color"], "#3dcc74");
+        assert_eq!(meta["stems"][1]["name"], "Vocal");
+        assert_eq!(meta["stems"][1]["color"], "#3dc2cc");
         // the two silent tracks stay grey, and the dsp block survives untouched
         assert_eq!(meta["stems"][2]["color"], "#3a3a3a");
         assert_eq!(meta["stems"][3]["color"], "#3a3a3a");

@@ -18,6 +18,12 @@ fn main() {
         return;
     }
 
+    // swap instrumental/vocal track order on an existing .stem.mp4
+    if let Some(path) = optional_flag(&args, "--swap-tracks") {
+        stem_udta::swap_tracks_in_place(&path);
+        return;
+    }
+
     if let Some(path) = optional_flag(&args, "--split") {
         let token = optional_flag(&args, "--token")
             .filter(|t| !t.trim().is_empty())
@@ -88,19 +94,20 @@ fn pack_stems(master: &str, vocal: &str, instrumental: &str, output: &str) {
     let sample_rate = probe(&master_a, "stream=sample_rate");
     make_silence(&silence_a, &duration, &sample_rate);
 
-    // track layout: master, Vocal, Instrumental, silence, silence
+    // track layout: master, Instrumental, Vocal, silence, silence
+    // (mixxx draws stem 2 on top of stem 1, so vocal sits above instrumental)
     run_cmd(
         "MP4Box",
         &[
             "-add",
             &format!("{}#audio:name=Master", master_a.display()),
             "-add",
-            &format!("{}#audio:disable:name=Vocal", vocal_a.display()),
-            "-add",
             &format!(
                 "{}#audio:disable:name=Instrumental",
                 instrumental_a.display()
             ),
+            "-add",
+            &format!("{}#audio:disable:name=Vocal", vocal_a.display()),
             "-add",
             &format!("{}#audio:disable:name=-", silence_a.display()),
             "-add",
@@ -129,7 +136,7 @@ fn pack_stems(master: &str, vocal: &str, instrumental: &str, output: &str) {
 fn flag(args: &[String], name: &str) -> String {
     optional_flag(args, name).unwrap_or_else(|| {
         die(
-            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]\n  genstems --colors FILE.stem.mp4",
+            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]\n  genstems --colors FILE.stem.mp4\n  genstems --swap-tracks FILE.stem.mp4",
         )
     })
 }

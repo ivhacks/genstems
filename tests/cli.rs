@@ -302,12 +302,15 @@ fn genstems_colors_stems_from_master_cover_art() {
         .expect("run genstems");
     assert!(status.success(), "genstems exited non-zero");
 
-    // red dominates the cover, cyan is the far-away runner-up
+    // track order: instrumental then vocal. red dominates, cyan is runner-up.
     let colors = stem_colors(&output);
-    assert_eq!(colors[0], "#00ffff", "vocal should be the cover's cyan");
     assert_eq!(
-        colors[1], "#ff0000",
-        "instrumental should be the cover's red"
+        colors[0], "#ff0000",
+        "instrumental (stem 0) should be the cover's red"
+    );
+    assert_eq!(
+        colors[1], "#00ffff",
+        "vocal (stem 1) should be the cover's cyan"
     );
     // the two silent tracks stay grey
     assert_eq!(colors[2], "#3a3a3a");
@@ -352,8 +355,8 @@ fn genstems_colors_flag_recolors_existing_stem_file() {
     assert!(status.success(), "genstems exited non-zero");
     assert_eq!(
         stem_colors(&output)[0],
-        "#ad65ff",
-        "a master with no cover art should leave the default colors"
+        "#00e8e8",
+        "a master with no cover art should leave the default instrumental color"
     );
 
     // now give it art, the way an already-packed file in the library would have it
@@ -374,10 +377,13 @@ fn genstems_colors_flag_recolors_existing_stem_file() {
     assert!(status.success(), "genstems --colors exited non-zero");
 
     let colors = stem_colors(&output);
-    assert_eq!(colors[0], "#00ffff", "vocal should be the cover's cyan");
     assert_eq!(
-        colors[1], "#ff0000",
-        "instrumental should be the cover's red"
+        colors[0], "#ff0000",
+        "instrumental (stem 0) should be the cover's red"
+    );
+    assert_eq!(
+        colors[1], "#00ffff",
+        "vocal (stem 1) should be the cover's cyan"
     );
     assert_eq!(colors[2], "#3a3a3a");
     assert_eq!(colors[3], "#3a3a3a");
@@ -426,11 +432,101 @@ fn genstems_colors_a_black_and_white_cover_by_lightness() {
     assert!(status.success(), "genstems exited non-zero");
 
     let colors = stem_colors(&output);
-    assert_eq!(colors[0], "#323232", "vocal should be the cover's black, floored");
+    // heavier extreme (white) → instrumental; dark floor → vocal
     assert_eq!(
-        colors[1], "#ffffff",
-        "instrumental should be the cover's white"
+        colors[0], "#ffffff",
+        "instrumental (stem 0) should be the cover's white"
+    );
+    assert_eq!(
+        colors[1], "#323232",
+        "vocal (stem 1) should be the cover's black, floored"
     );
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// --swap-tracks flips instrumental/vocal audio + metadata on an existing file.
+#[test]
+fn genstems_swap_tracks_flips_instrumental_and_vocal() {
+    for tool in ["ffmpeg", "ffprobe", "MP4Box", "metaflac"] {
+        require_tool(tool);
+    }
+
+    let dir = temp_dir();
+    let cover = dir.join("cover.png");
+    let master = dir.join("song.flac");
+    let vocal = dir.join("song_vocal.flac");
+    let instrumental = dir.join("song_instrumental.flac");
+    let output = dir.join("out.stem.mp4");
+
+    make_cover(&cover);
+    make_flac_with_cover(&master, &cover, 440, 1.5);
+    make_flac(&vocal, 880, 1.5);
+    make_flac(&instrumental, 220, 1.5);
+
+    let status = Command::new(bin())
+        .args([
+            "--master",
+            master.to_str().unwrap(),
+            "--vocal",
+            vocal.to_str().unwrap(),
+            "--instrumental",
+            instrumental.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ])
+        .status()
+        .expect("run genstems");
+    assert!(status.success(), "genstems exited non-zero");
+
+    // new layout: instrumental first, vocal second
+    let before = stem_names_and_colors(&output);
+    assert_eq!(before[0].0, "Instrumental");
+    assert_eq!(before[1].0, "Vocal");
+    assert_eq!(before[0].1, "#ff0000");
+    assert_eq!(before[1].1, "#00ffff");
+
+    let status = Command::new(bin())
+        .args(["--swap-tracks", output.to_str().unwrap()])
+        .status()
+        .expect("run genstems --swap-tracks");
+    assert!(status.success(), "genstems --swap-tracks exited non-zero");
+
+    let after = stem_names_and_colors(&output);
+    assert_eq!(after[0].0, "Vocal");
+    assert_eq!(after[1].0, "Instrumental");
+    assert_eq!(after[0].1, "#00ffff");
+    assert_eq!(after[1].1, "#ff0000");
+    assert_eq!(stream_count(&output), 5, "expected 5 audio tracks");
+    assert!(has_stem_udta(&output), "stem udta damaged by --swap-tracks");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+fn stem_names_and_colors(path: &Path) -> Vec<(String, String)> {
+    let dump = Command::new("MP4Box")
+        .args(["-info", path.to_str().unwrap()])
+        .output()
+        .expect("MP4Box -info");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&dump.stdout),
+        String::from_utf8_lossy(&dump.stderr)
+    );
+    let json = combined
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("stem: "))
+        .expect("no stem udta in file");
+    let meta: serde_json::Value = serde_json::from_str(json).expect("stem udta is not json");
+    meta["stems"]
+        .as_array()
+        .expect("stems[]")
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().expect("name").to_string(),
+                s["color"].as_str().expect("color").to_string(),
+            )
+        })
+        .collect()
 }
