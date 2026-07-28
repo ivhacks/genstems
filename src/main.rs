@@ -1,5 +1,7 @@
+mod colors;
 mod metadata;
 mod split;
+mod stem_udta;
 
 use std::env;
 use std::fs;
@@ -7,35 +9,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio, exit};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
-use serde_json::Value;
-
-// full NI schema (dsp knobs stay even when disabled — picky players expect them).
-// parsed at runtime so a typo dies early; re-serialized compact for the udta box.
-const STEM_JSON: &str = r##"{
-  "version": 1,
-  "mastering_dsp": {
-    "compressor": {
-      "enabled": false,
-      "input_gain": 0, "output_gain": 0, "threshold": 0.0,
-      "dry_wet": 0, "attack": 0.001, "release": 0.2, "ratio": 1.5, "hp_cutoff": 50
-    },
-    "limiter": {
-      "enabled": false,
-      "threshold": 0.0, "ceiling": -0.35, "release": 0.05
-    }
-  },
-  "stems": [
-    { "name": "Vocal", "color": "#ad65ff" },
-    { "name": "Instrumental", "color": "#00e8e8" },
-    { "name": "-", "color": "#3a3a3a" },
-    { "name": "-", "color": "#3a3a3a" }
-  ]
-}"##;
-
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    // backfill: recolor a .stem.mp4 that already exists, in place
+    if let Some(path) = optional_flag(&args, "--colors") {
+        stem_udta::recolor_in_place(&path);
+        return;
+    }
 
     if let Some(path) = optional_flag(&args, "--split") {
         let token = optional_flag(&args, "--token")
@@ -87,7 +68,8 @@ fn default_stem_out(master: &str) -> String {
 }
 
 fn pack_stems(master: &str, vocal: &str, instrumental: &str, output: &str) {
-    let stem_b64 = stem_payload_b64();
+    // stem colors come from the master's cover art; without art we keep the defaults
+    let stem_b64 = stem_udta::payload_b64(colors::from_cover_art(Path::new(master)).as_ref());
 
     let work = work_dir();
     fs::create_dir_all(&work).expect("mkdir work dir");
@@ -144,23 +126,10 @@ fn pack_stems(master: &str, vocal: &str, instrumental: &str, output: &str) {
     eprintln!("wrote {output}");
 }
 
-fn stem_payload_b64() -> String {
-    let meta: Value =
-        serde_json::from_str(STEM_JSON).unwrap_or_else(|e| die(&format!("STEM_JSON invalid: {e}")));
-    let stems = meta
-        .get("stems")
-        .and_then(|s| s.as_array())
-        .unwrap_or_else(|| die("STEM_JSON missing stems[]"));
-    if stems.len() != 4 {
-        die(&format!("STEM_JSON needs 4 stems, got {}", stems.len()));
-    }
-    B64.encode(serde_json::to_string(&meta).unwrap().as_bytes())
-}
-
 fn flag(args: &[String], name: &str) -> String {
     optional_flag(args, name).unwrap_or_else(|| {
         die(
-            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]",
+            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]\n  genstems --colors FILE.stem.mp4",
         )
     })
 }
