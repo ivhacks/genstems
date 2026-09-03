@@ -1,10 +1,12 @@
 # Project: genstems
 This project converts normal song files (.flac, .mp3) to NI Stem files (.stem.mp4). The formal spec is in stem_spec.pdf. This is for DJing, I want to control the vocal and instrumental seperately in Mixxx. The spec requires 1 master track and 4 stem tracks, but we're abusing the format a little bit to only have two tracks. The other two are just silence, the same length as the real two. 
 - Track 1 (Master): Original song
-- Track 2: Vocal
-- Track 3: Instrumental
+- Track 2: Instrumental
+- Track 3: Vocal
 - Track 4: Silence
 - Track 5: Silence
+
+(mixxx draws stem 2 on top of stem 1, so vocal sits above instrumental)
 
 I'm manually using https://vocalremover.org/next/ to seperate out the vocal/instrumental. Short term goal is for this program to take in the master track and the two split out tracks.
 Example command line:
