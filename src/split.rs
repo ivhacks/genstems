@@ -665,8 +665,8 @@ mod tests {
     #[test]
     fn normalize_token_strips_bearer() {
         assert_eq!(
-            normalize_token("Bearer 6cbbbadc-9a26-4bf1-bb72-05d00f6d2639"),
-            "6cbbbadc-9a26-4bf1-bb72-05d00f6d2639"
+            normalize_token("Bearer test-token-not-a-secret"),
+            "test-token-not-a-secret"
         );
         assert_eq!(normalize_token("  abc  "), "abc");
     }
