@@ -36,6 +36,8 @@ fn main() {
             });
         let output = optional_flag(&args, "--output").unwrap_or_else(|| default_stem_out(&path));
 
+        // check before the split: it burns vocalremover quota, so don't die after it
+        require_tools(&["curl", "ffmpeg", "ffprobe", "metaflac", "MP4Box"]);
         let split = split::run(&path, &token);
         pack_stems(
             &path,
@@ -51,6 +53,8 @@ fn main() {
     let vocal = flag(&args, "--vocal");
     let instrumental = flag(&args, "--instrumental");
     let output = optional_flag(&args, "--output").unwrap_or_else(|| default_stem_out(&master));
+
+    require_tools(&["ffmpeg", "ffprobe", "metaflac", "MP4Box"]);
 
     for (name, path) in [
         ("--master", &master),
@@ -226,6 +230,36 @@ fn run_cmd(program: &str, args: &[&str]) {
         .unwrap_or_else(|e| die(&format!("failed to run {program}: {e}")));
     if !status.success() {
         die(&format!("{program} failed"));
+    }
+}
+
+/// die naming every missing tool and how to get it, before doing any real work.
+fn require_tools(tools: &[&str]) {
+    let path = env::var_os("PATH").unwrap_or_default();
+    let missing: Vec<&str> = tools
+        .iter()
+        .copied()
+        .filter(|tool| !env::split_paths(&path).any(|dir| dir.join(tool).is_file()))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let mut msg = String::from("required tools not on PATH:");
+    for tool in missing {
+        msg += &format!("\n  {tool}: {}", install_hint(tool));
+    }
+    die(&msg);
+}
+
+fn install_hint(tool: &str) -> &'static str {
+    match tool {
+        "ffmpeg" | "ffprobe" => "debian: apt install ffmpeg | fedora: dnf install ffmpeg",
+        "metaflac" => "debian: apt install flac | fedora: dnf install flac",
+        "MP4Box" => {
+            "debian: apt install gpac (or build from https://github.com/gpac/gpac) | fedora: dnf install gpac"
+        }
+        "curl" => "debian: apt install curl | fedora: dnf install curl",
+        _ => "install it and put it on PATH",
     }
 }
 

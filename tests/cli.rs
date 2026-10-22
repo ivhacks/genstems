@@ -530,3 +530,24 @@ fn stem_names_and_colors(path: &Path) -> Vec<(String, String)> {
         })
         .collect()
 }
+
+#[test]
+fn genstems_split_dies_up_front_when_tools_are_missing() {
+    // empty PATH: must bail before touching the split api
+    let dir = temp_dir();
+    let out = Command::new(bin())
+        .args(["--split", "nope.flac", "--token", "test-token-not-a-secret"])
+        .env("PATH", &dir)
+        .output()
+        .expect("spawn genstems");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for tool in ["curl", "ffmpeg", "ffprobe", "metaflac", "MP4Box"] {
+        assert!(stderr.contains(tool), "missing {tool} in: {stderr}");
+    }
+    assert!(
+        stderr.contains("apt install flac"),
+        "no install hint: {stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
