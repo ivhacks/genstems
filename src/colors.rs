@@ -569,7 +569,10 @@ mod tests {
         px.extend(solid([0, 255, 255], 40));
 
         let colors = from_rgb(&px);
-        assert_eq!(colors.instrumental, "#ff0000", "red covers more of the image");
+        assert_eq!(
+            colors.instrumental, "#ff0000",
+            "red covers more of the image"
+        );
         assert_eq!(colors.vocal, "#00ffff");
     }
 
