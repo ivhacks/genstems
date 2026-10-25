@@ -24,6 +24,13 @@ fn main() {
         return;
     }
 
+    // break a genstems .stem.mp4 back into flacs next to it, stream-copied
+    if let Some(path) = optional_flag(&args, "--dissociate") {
+        require_tools(&["ffmpeg", "ffprobe"]);
+        dissociate(&path);
+        return;
+    }
+
     if let Some(path) = optional_flag(&args, "--split") {
         let token = optional_flag(&args, "--token")
             .filter(|t| !t.trim().is_empty())
@@ -75,6 +82,49 @@ fn default_stem_out(master: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("output");
     format!("{stem}.stem.mp4")
+}
+
+fn dissociate(stem_file: &str) {
+    let labels = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream_tags=handler_name",
+            "-of",
+            "csv=p=0",
+            stem_file,
+        ])
+        .output()
+        .unwrap_or_else(|e| die(&format!("failed to run ffprobe: {e}")));
+    let labels = String::from_utf8_lossy(&labels.stdout);
+    if labels.lines().collect::<Vec<_>>() != ["Master", "Instrumental", "Vocal", "-", "-"] {
+        die(&format!(
+            "{stem_file} isn't a genstems stem file (tracks: {labels:?})"
+        ));
+    }
+    let base = stem_file.strip_suffix(".stem.mp4").unwrap_or(stem_file);
+    for (i, name) in ["Master", "Instrumental", "Vocal"].iter().enumerate() {
+        let out = format!("{base} - {name}.flac");
+        run_cmd(
+            "ffmpeg",
+            &[
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                stem_file,
+                "-map",
+                &format!("0:a:{i}"),
+                "-c",
+                "copy",
+                &out,
+            ],
+        );
+        eprintln!("wrote {out}");
+    }
 }
 
 fn pack_stems(master: &str, vocal: &str, instrumental: &str, output: &str) {
@@ -140,7 +190,7 @@ fn pack_stems(master: &str, vocal: &str, instrumental: &str, output: &str) {
 fn flag(args: &[String], name: &str) -> String {
     optional_flag(args, name).unwrap_or_else(|| {
         die(
-            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]\n  genstems --colors FILE.stem.mp4\n  genstems --swap-tracks FILE.stem.mp4",
+            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]\n  genstems --colors FILE.stem.mp4\n  genstems --swap-tracks FILE.stem.mp4\n  genstems --dissociate FILE.stem.mp4",
         )
     })
 }

@@ -20,4 +20,7 @@ genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]
 genstems --split FILE --token TOKEN [--output FILE]
 genstems --colors FILE.stem.mp4
 genstems --swap-tracks FILE.stem.mp4
+genstems --dissociate FILE.stem.mp4
 ```
+
+`--dissociate` copies the master, instrumental and vocal tracks of a genstems .stem.mp4 out to `<title> - <Track>.flac` next to it, no transcoding.
