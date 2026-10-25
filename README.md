@@ -20,4 +20,7 @@ genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]
 genstems --split FILE --token TOKEN [--output FILE]
 genstems --colors FILE.stem.mp4
 genstems --swap-tracks FILE.stem.mp4
+genstems --dissociate FILE.stem.mp4 [--output DIR]
 ```
+
+`--dissociate` breaks a .stem.mp4 back into one file per track (master + stems), stream-copied with no transcoding, so each keeps its codec (flac → .flac, aac/alac → .m4a, mp3 → .mp3). output goes to `<title> stems/` next to the input unless `--output DIR`. silent filler tracks (named `-`) are skipped.

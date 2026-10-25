@@ -24,6 +24,15 @@ fn main() {
         return;
     }
 
+    // break a .stem.mp4 back into its tracks, stream-copied (no transcoding)
+    if let Some(path) = optional_flag(&args, "--dissociate") {
+        require_tools(&["ffmpeg", "ffprobe"]);
+        let output =
+            optional_flag(&args, "--output").unwrap_or_else(|| default_dissociate_dir(&path));
+        dissociate(&path, &output);
+        return;
+    }
+
     if let Some(path) = optional_flag(&args, "--split") {
         let token = optional_flag(&args, "--token")
             .filter(|t| !t.trim().is_empty())
@@ -75,6 +84,87 @@ fn default_stem_out(master: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("output");
     format!("{stem}.stem.mp4")
+}
+
+fn default_dissociate_dir(stem_file: &str) -> String {
+    let p = Path::new(stem_file);
+    let dir = p.parent().unwrap_or(Path::new(""));
+    dir.join(format!("{} stems", title_of(stem_file)))
+        .display()
+        .to_string()
+}
+
+fn title_of(stem_file: &str) -> String {
+    let name = Path::new(stem_file)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    name.strip_suffix(".stem.mp4").unwrap_or(name).to_string()
+}
+
+// one file per track, in its native codec. tracks named "-" are our silent filler, skipped.
+fn dissociate(stem_file: &str, out_dir: &str) {
+    if !Path::new(stem_file).is_file() {
+        die(&format!("--dissociate file not found: {stem_file}"));
+    }
+    let listing = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_name:stream_tags=handler_name",
+            "-of",
+            "csv=p=0",
+            stem_file,
+        ])
+        .output()
+        .unwrap_or_else(|e| die(&format!("failed to run ffprobe: {e}")));
+    if !listing.status.success() {
+        die(&format!(
+            "ffprobe failed: {}",
+            String::from_utf8_lossy(&listing.stderr)
+        ));
+    }
+    // NI stem layout when tracks are unnamed: master, then 4 stems
+    let defaults = ["Master", "Drums", "Bass", "Other", "Vocals"];
+    let title = title_of(stem_file);
+    fs::create_dir_all(out_dir).expect("mkdir output dir");
+
+    for (i, line) in String::from_utf8_lossy(&listing.stdout).lines().enumerate() {
+        let (codec, handler) = line.split_once(',').unwrap_or((line, ""));
+        let name = match handler.trim() {
+            "-" => continue,
+            "" | "SoundHandler" => defaults.get(i).copied().unwrap_or("Track").to_string(),
+            h => h.to_string(),
+        };
+        let ext = match codec {
+            "flac" => "flac",
+            "mp3" => "mp3",
+            "opus" | "vorbis" => "ogg",
+            _ => "m4a", // aac, alac
+        };
+        let out = Path::new(out_dir).join(format!("{title} - {name}.{ext}"));
+        run_cmd(
+            "ffmpeg",
+            &[
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                stem_file,
+                "-map",
+                &format!("0:a:{i}"),
+                "-map_metadata",
+                "-1",
+                "-c",
+                "copy",
+                out.to_str().unwrap(),
+            ],
+        );
+        eprintln!("wrote {}", out.display());
+    }
 }
 
 fn pack_stems(master: &str, vocal: &str, instrumental: &str, output: &str) {
@@ -140,7 +230,7 @@ fn pack_stems(master: &str, vocal: &str, instrumental: &str, output: &str) {
 fn flag(args: &[String], name: &str) -> String {
     optional_flag(args, name).unwrap_or_else(|| {
         die(
-            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]\n  genstems --colors FILE.stem.mp4\n  genstems --swap-tracks FILE.stem.mp4",
+            "usage:\n  genstems --master FILE --vocal FILE --instrumental FILE [--output FILE]\n  genstems --split FILE --token TOKEN [--output FILE]\n  genstems --colors FILE.stem.mp4\n  genstems --swap-tracks FILE.stem.mp4\n  genstems --dissociate FILE.stem.mp4 [--output DIR]",
         )
     })
 }
