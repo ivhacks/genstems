@@ -63,12 +63,24 @@ pub fn run(input: &str, token: &str) -> SplitFiles {
     let vocal = work.join("vocals.flac");
     let instrumental = work.join("music.flac");
 
-    eprintln!("creating split job…");
-    let (job_id, host) = create_job(&token);
-    eprintln!("job {job_id} on {host}");
+    // the server sometimes forgets an upload mid-way (tus patch 404 "Upload Not Found");
+    // that upload is gone for good, so start over with a fresh job
+    let mut attempt = 1;
+    let (job_id, host) = loop {
+        eprintln!("creating split job…");
+        let (job_id, host) = create_job(&token);
+        eprintln!("job {job_id} on {host}");
 
-    eprintln!("uploading {file_name} ({size} bytes)…");
-    tus_upload(&token, &host, &job_id, path, file_name, size, mime);
+        eprintln!("uploading {file_name} ({size} bytes)…");
+        match tus_upload(&token, &host, &job_id, path, file_name, size, mime) {
+            Ok(()) => break (job_id, host),
+            Err(e) if attempt < UPLOAD_ATTEMPTS => {
+                eprintln!("  {e}, retrying with a new job ({attempt}/{UPLOAD_ATTEMPTS})");
+                attempt += 1;
+            }
+            Err(e) => die(&e),
+        }
+    };
 
     eprintln!("starting split…");
     attach_file(&token, &host, &job_id);
@@ -157,6 +169,8 @@ fn create_job(token: &str) -> (String, String) {
     (id, host)
 }
 
+const UPLOAD_ATTEMPTS: u32 = 3;
+
 fn tus_upload(
     token: &str,
     host: &str,
@@ -165,7 +179,7 @@ fn tus_upload(
     file_name: &str,
     size: u64,
     mime: &str,
-) {
+) -> Result<(), String> {
     let meta = format!(
         "filename {},type {},size {},model {}",
         b64s(file_name),
@@ -238,6 +252,10 @@ fn tus_upload(
             "--data-binary",
             &format!("@{}", chunk_path.display()),
         ]);
+        if code == 404 {
+            let _ = fs::remove_dir_all(&work);
+            return Err(format!("tus patch HTTP 404 at offset {offset}: {}", body.trim()));
+        }
         if !(200..300).contains(&code) {
             let _ = fs::remove_dir_all(&work);
             die(&format!("tus patch HTTP {code} at offset {offset}: {body}"));
@@ -246,6 +264,7 @@ fn tus_upload(
         eprintln!("  uploaded {offset}/{size}");
     }
     let _ = fs::remove_dir_all(&work);
+    Ok(())
 }
 
 fn attach_file(token: &str, host: &str, job_id: &str) {
