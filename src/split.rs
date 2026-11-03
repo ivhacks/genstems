@@ -341,6 +341,10 @@ fn curl(args: &[&str]) -> (u16, String) {
         "--http1.1",
         "--max-time",
         "600",
+        // api responses sometimes get cut off mid-body (curl 18); retry instead of dying
+        "--retry",
+        "3",
+        "--retry-all-errors",
         "-w",
         "\n__GENSTEMS_HTTP_CODE__%{http_code}",
     ])
